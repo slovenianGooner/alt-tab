@@ -73,6 +73,20 @@ class HotkeyMonitor {
             return nil  // consume
         }
 
+        // Arrow navigation while switcher is open
+        if type == .keyDown && switcher.isVisible {
+            let isUp = keyCode == 126, isDown = keyCode == 125
+            let isLeft = keyCode == 123, isRight = keyCode == 124
+            let isVertical = switcher.isVertical
+            if (isVertical && (isUp || isDown)) || (!isVertical && (isLeft || isRight)) {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if isUp || isLeft { self.switcher.selectPrev() } else { self.switcher.selectNext() }
+                }
+                return nil  // consume
+            }
+        }
+
         guard cmdDown && isTab else { return Unmanaged.passRetained(event) }
 
         if type == .keyDown {
