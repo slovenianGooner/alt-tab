@@ -200,7 +200,7 @@ class SwitcherWindowController {
             totalHeight = ICON_SIZE + 36 + ITEM_PADDING * 2
         }
 
-        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        let screen = NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
         let origin = NSPoint(x: screen.midX - totalWidth / 2, y: screen.midY - totalHeight / 2)
         panel.setFrame(NSRect(origin: origin, size: NSSize(width: totalWidth, height: totalHeight)), display: false)
     }
