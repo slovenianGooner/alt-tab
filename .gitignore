@@ -1,0 +1,5 @@
+.DS_Store
+AltTab/.build/
+AltTab/AltTab.app/
+*.o
+*.d
