@@ -11,47 +11,33 @@ struct WindowInfo: Identifiable {
     let app: NSRunningApplication
 }
 
-// AX title lookup tables for one process: by CGWindowID (when available) and by window origin.
-// AXWindowID is an undocumented attribute not supported by all apps, so we index by screen
-// position as a reliable fallback — both CG and AX use the same top-left coordinate system.
-private struct AXTitleCache {
-    var byID:     [CGWindowID: String] = [:]
-    var byOrigin: [String:     String] = [:]  // key: "\(x),\(y)"
-}
-
-private func buildAXTitleCache(for pid: pid_t) -> AXTitleCache {
+// Returns AX window titles for a process as (ordered list, id→title map).
+// kAXWindowsAttribute enumerates only on-screen non-minimized windows, front-to-back —
+// the same set and order that CGWindowListCopyWindowInfo returns for a given PID.
+private func axWindowInfo(for pid: pid_t) -> (ordered: [String], byID: [CGWindowID: String]) {
     let axApp = AXUIElementCreateApplication(pid)
     var windowsRef: CFTypeRef?
-    if AXUIElementCopyAttributeValue(axApp, "AXAllWindows" as CFString, &windowsRef) != .success {
-        AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef)
-    }
-    guard let axWindows = windowsRef as? [AXUIElement] else { return AXTitleCache() }
+    AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef)
+    guard let axWindows = windowsRef as? [AXUIElement] else { return ([], [:]) }
 
-    var cache = AXTitleCache()
+    var ordered: [String] = []
+    var byID: [CGWindowID: String] = [:]
+
     for axWindow in axWindows {
         var titleRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef) == .success,
-              let title = titleRef as? String, !title.isEmpty
-        else { continue }
+        let title = AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef) == .success
+            ? (titleRef as? String ?? "")
+            : ""
 
-        // Primary: match by AXWindowID (same value as kCGWindowNumber, works where supported)
+        ordered.append(title)
+
         var idRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(axWindow, "AXWindowID" as CFString, &idRef) == .success,
            let axID = (idRef as? NSNumber)?.uint32Value {
-            cache.byID[axID] = title
-        }
-
-        // Fallback: match by top-left screen origin
-        var posRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &posRef) == .success,
-           let posVal = posRef as! AXValue? {
-            var pt = CGPoint.zero
-            if AXValueGetValue(posVal, .cgPoint, &pt) {
-                cache.byOrigin["\(pt.x),\(pt.y)"] = title
-            }
+            byID[axID] = title
         }
     }
-    return cache
+    return (ordered, byID)
 }
 
 func fetchWindows() -> [WindowInfo] {
@@ -60,47 +46,49 @@ func fetchWindows() -> [WindowInfo] {
         return []
     }
 
-    // Build AX title caches once per app (not once per window).
-    let pids = Set(list.compactMap { $0[kCGWindowOwnerPID as String] as? Int32 })
-    var titleCache: [pid_t: AXTitleCache] = [:]
-    for pid in pids { titleCache[pid_t(pid)] = buildAXTitleCache(for: pid_t(pid)) }
+    // Build AX info once per app.
+    let pids = Set(list.compactMap { $0[kCGWindowOwnerPID as String] as? Int32 }.map { pid_t($0) })
+    var axCache: [pid_t: (ordered: [String], byID: [CGWindowID: String])] = [:]
+    for pid in pids { axCache[pid] = axWindowInfo(for: pid) }
+
+    // Track how many CG windows we've seen per PID for index-based fallback.
+    var pidIndex: [pid_t: Int] = [:]
 
     var results: [WindowInfo] = []
 
     for info in list {
         guard
-            let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
-            let pidNum = info[kCGWindowOwnerPID as String] as? Int32,
-            let app = NSRunningApplication(processIdentifier: pidNum),
+            let layer   = info[kCGWindowLayer as String]    as? Int,    layer == 0,
+            let pidNum  = info[kCGWindowOwnerPID as String] as? Int32,
+            let app     = NSRunningApplication(processIdentifier: pidNum),
             !app.isHidden,
             app.activationPolicy == .regular
         else { continue }
 
         if let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] {
-            let w = bounds["Width"] ?? 0
-            let h = bounds["Height"] ?? 0
-            if w < 100 || h < 100 { continue }
+            if (bounds["Width"] ?? 0) < 100 || (bounds["Height"] ?? 0) < 100 { continue }
         }
 
-        let winID = CGWindowID(info[kCGWindowNumber as String] as? Int ?? 0)
+        let pid    = pid_t(pidNum)
+        let winID  = CGWindowID(info[kCGWindowNumber as String] as? Int ?? 0)
         let appName = info[kCGWindowOwnerName as String] as? String ?? app.localizedName ?? "Unknown"
-        let cache = titleCache[pid_t(pidNum)]
+        let ax     = axCache[pid]
+        let idx    = pidIndex[pid, default: 0]
+        pidIndex[pid, default: 0] += 1
 
-        // Try ID match first; fall back to origin match for apps that don't expose AXWindowID.
-        let axTitle: String?
-        if let t = cache?.byID[winID] {
+        // ID match is exact; index match works because both APIs enumerate front-to-back.
+        let axTitle: String
+        if let t = ax?.byID[winID], !t.isEmpty {
             axTitle = t
-        } else if let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
-                  let x = bounds["X"], let y = bounds["Y"],
-                  let t = cache?.byOrigin["\(x),\(y)"] {
+        } else if let t = ax?.ordered[safe: idx], !t.isEmpty {
             axTitle = t
         } else {
-            axTitle = nil
+            axTitle = appName
         }
-        let rawTitle = axTitle ?? appName
 
-        if rawTitle == "Picture in Picture" { continue }
+        if axTitle == "Picture in Picture" { continue }
 
+        let rawTitle = axTitle
         let winTitle = rawTitle.hasSuffix(" - \(appName)")
             ? String(rawTitle.dropLast(" - \(appName)".count))
             : rawTitle
@@ -114,10 +102,16 @@ func fetchWindows() -> [WindowInfo] {
             rawTitle: rawTitle,
             appName: appName,
             icon: icon,
-            pid: pid_t(pidNum),
+            pid: pid,
             app: app
         ))
     }
 
     return results
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
 }
