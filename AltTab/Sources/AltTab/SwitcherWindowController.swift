@@ -14,12 +14,19 @@ class SwitcherWindowController {
     private var itemViews: [NSView] = []
     private var labelViews: [NSTextField] = []
 
-    var isVertical: Bool = false
+    var isVertical: Bool {
+        get { ConfigManager.shared.config.isVertical }
+        set { ConfigManager.shared.update { $0.isVertical = newValue } }
+    }
     var isVisible: Bool { panel?.isVisible ?? false }
 
     func toggleOrientation() {
         isVertical.toggle()
         panel = nil  // force panel rebuild with new orientation
+    }
+
+    func invalidatePanel() {
+        panel = nil
     }
 
     func show(startingNext: Bool = true) {
@@ -225,7 +232,7 @@ class SwitcherWindowController {
         img.translatesAutoresizingMaskIntoConstraints = false
 
         let label = NSTextField(labelWithString: w.windowTitle)
-        label.font = .systemFont(ofSize: 11)
+        label.font = .systemFont(ofSize: CGFloat(ConfigManager.shared.config.fontSize))
         label.textColor = selected ? .white : NSColor(calibratedWhite: 0.7, alpha: 1)
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 2
