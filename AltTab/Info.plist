@@ -24,9 +24,7 @@
     <true/>
     <key>NSAccessibilityUsageDescription</key>
     <string>AltTab needs Accessibility access to intercept Cmd+Tab and switch windows.</string>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>AltTab needs Screen Recording access to read window titles.</string>
-    <key>NSAppleScriptEnabled</key>
+<key>NSAppleScriptEnabled</key>
     <true/>
 </dict>
 </plist>

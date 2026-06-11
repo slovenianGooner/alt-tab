@@ -4,9 +4,6 @@ import ServiceManagement
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)  // no Dock icon
 
-// Request Screen Recording so kCGWindowName returns real window titles
-CGRequestScreenCaptureAccess()
-
 // Register as a login item (silently; no prompt needed on macOS 13+)
 try? SMAppService.mainApp.register()
 
