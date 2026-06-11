@@ -16,6 +16,9 @@ cp .build/release/AltTab "$MACOS/AltTab"
 cp Info.plist "$BUNDLE/Contents/Info.plist"
 cp AppIcon.icns "$BUNDLE/Contents/Resources/AppIcon.icns"
 
+echo "Signing..."
+codesign --force --deep --sign "AltTab Code Signing" "$BUNDLE"
+
 echo "Installing to /Applications..."
 rm -rf /Applications/AltTab.app
 cp -r "$BUNDLE" /Applications/AltTab.app
