@@ -11,27 +11,47 @@ struct WindowInfo: Identifiable {
     let app: NSRunningApplication
 }
 
-// Build a CGWindowID → AX title map for a given process using the Accessibility API.
-private func axTitles(for pid: pid_t) -> [CGWindowID: String] {
+// AX title lookup tables for one process: by CGWindowID (when available) and by window origin.
+// AXWindowID is an undocumented attribute not supported by all apps, so we index by screen
+// position as a reliable fallback — both CG and AX use the same top-left coordinate system.
+private struct AXTitleCache {
+    var byID:     [CGWindowID: String] = [:]
+    var byOrigin: [String:     String] = [:]  // key: "\(x),\(y)"
+}
+
+private func buildAXTitleCache(for pid: pid_t) -> AXTitleCache {
     let axApp = AXUIElementCreateApplication(pid)
     var windowsRef: CFTypeRef?
     if AXUIElementCopyAttributeValue(axApp, "AXAllWindows" as CFString, &windowsRef) != .success {
         AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef)
     }
-    guard let axWindows = windowsRef as? [AXUIElement] else { return [:] }
+    guard let axWindows = windowsRef as? [AXUIElement] else { return AXTitleCache() }
 
-    var map: [CGWindowID: String] = [:]
+    var cache = AXTitleCache()
     for axWindow in axWindows {
-        var idRef: CFTypeRef?
         var titleRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axWindow, "AXWindowID" as CFString, &idRef) == .success,
-              let axID = (idRef as? NSNumber)?.uint32Value,
-              AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef) == .success,
-              let title = titleRef as? String
+        guard AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef) == .success,
+              let title = titleRef as? String, !title.isEmpty
         else { continue }
-        map[axID] = title
+
+        // Primary: match by AXWindowID (same value as kCGWindowNumber, works where supported)
+        var idRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axWindow, "AXWindowID" as CFString, &idRef) == .success,
+           let axID = (idRef as? NSNumber)?.uint32Value {
+            cache.byID[axID] = title
+        }
+
+        // Fallback: match by top-left screen origin
+        var posRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &posRef) == .success,
+           let posVal = posRef as! AXValue? {
+            var pt = CGPoint.zero
+            if AXValueGetValue(posVal, .cgPoint, &pt) {
+                cache.byOrigin["\(pt.x),\(pt.y)"] = title
+            }
+        }
     }
-    return map
+    return cache
 }
 
 func fetchWindows() -> [WindowInfo] {
@@ -40,10 +60,10 @@ func fetchWindows() -> [WindowInfo] {
         return []
     }
 
-    // Collect unique PIDs up front so we call axTitles once per app, not once per window.
+    // Build AX title caches once per app (not once per window).
     let pids = Set(list.compactMap { $0[kCGWindowOwnerPID as String] as? Int32 })
-    var titleCache: [pid_t: [CGWindowID: String]] = [:]
-    for pid in pids { titleCache[pid_t(pid)] = axTitles(for: pid_t(pid)) }
+    var titleCache: [pid_t: AXTitleCache] = [:]
+    for pid in pids { titleCache[pid_t(pid)] = buildAXTitleCache(for: pid_t(pid)) }
 
     var results: [WindowInfo] = []
 
@@ -64,7 +84,20 @@ func fetchWindows() -> [WindowInfo] {
 
         let winID = CGWindowID(info[kCGWindowNumber as String] as? Int ?? 0)
         let appName = info[kCGWindowOwnerName as String] as? String ?? app.localizedName ?? "Unknown"
-        let rawTitle = titleCache[pid_t(pidNum)]?[winID].flatMap { $0.isEmpty ? nil : $0 } ?? appName
+        let cache = titleCache[pid_t(pidNum)]
+
+        // Try ID match first; fall back to origin match for apps that don't expose AXWindowID.
+        let axTitle: String?
+        if let t = cache?.byID[winID] {
+            axTitle = t
+        } else if let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = bounds["X"], let y = bounds["Y"],
+                  let t = cache?.byOrigin["\(x),\(y)"] {
+            axTitle = t
+        } else {
+            axTitle = nil
+        }
+        let rawTitle = axTitle ?? appName
 
         if rawTitle == "Picture in Picture" { continue }
 
